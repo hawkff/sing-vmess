@@ -372,7 +372,7 @@ func (s *Service[U]) NewConnection(ctx context.Context, conn net.Conn, source M.
 	return nil
 }
 
-var _ N.EarlyConn = (*rawServerConn)(nil)
+var _ N.EarlyWriter = (*rawServerConn)(nil)
 
 type rawServerConn struct {
 	net.Conn
@@ -449,7 +449,11 @@ func (c *rawServerConn) RearHeadroom() int {
 	return MaxRearHeadroom
 }
 
-func (c *rawServerConn) NeedHandshake() bool {
+func (c *rawServerConn) ReaderOverhead() int {
+	return ReaderOverhead(c.security, c.option)
+}
+
+func (c *rawServerConn) NeedHandshakeForWrite() bool {
 	return c.writer == nil
 }
 

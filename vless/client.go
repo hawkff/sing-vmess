@@ -102,7 +102,10 @@ func (c *Client) DialEarlyXUDPPacketConn(conn net.Conn, destination M.Socksaddr)
 	return vmess.NewXUDPConn(protocolConn, destination), common.Error(remoteConn.Write(nil))
 }
 
-var _ N.EarlyConn = (*Conn)(nil)
+var (
+	_ N.EarlyReader = (*Conn)(nil)
+	_ N.EarlyWriter = (*Conn)(nil)
+)
 
 type Conn struct {
 	N.ExtendedConn
@@ -176,14 +179,12 @@ func (c *Conn) WriterReplaceable() bool {
 	return c.requestWritten
 }
 
-func (c *Conn) NeedHandshake() bool {
-	return !c.requestWritten
-}
-
-// it only lets future sing v0.8+ pick up the read-side handshake.
-// or use  EarlyReader/EarlyWriter in sing v0.8+
 func (c *Conn) NeedHandshakeForRead() bool {
 	return !c.responseRead
+}
+
+func (c *Conn) NeedHandshakeForWrite() bool {
+	return !c.requestWritten
 }
 
 func (c *Conn) FrontHeadroom() int {
