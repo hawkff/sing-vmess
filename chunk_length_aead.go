@@ -124,6 +124,9 @@ func NewChacha20Poly1305ChunkWriter(upstream io.Writer, key []byte, nonce []byte
 }
 
 func (w *AEADChunkWriter) Write(p []byte) (n int, err error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	dataLength := uint16(len(p))
 	var paddingLen uint16
 	if w.globalPadding != nil {
@@ -145,6 +148,7 @@ func (w *AEADChunkWriter) Write(p []byte) (n int, err error) {
 	lengthBuffer.Extend(CipherOverhead)
 
 	w.writeAccess.Lock()
+	defer w.writeAccess.Unlock()
 	_, err = lengthBuffer.WriteTo(w.upstream)
 	if err != nil {
 		return
@@ -162,11 +166,14 @@ func (w *AEADChunkWriter) Write(p []byte) (n int, err error) {
 			return
 		}
 	}
-	w.writeAccess.Unlock()
 	return
 }
 
 func (w *AEADChunkWriter) WriteBuffer(buffer *buf.Buffer) error {
+	if buffer.IsEmpty() {
+		buffer.Release()
+		return nil
+	}
 	dataLength := uint16(buffer.Len())
 	var paddingLen uint16
 	if w.globalPadding != nil {

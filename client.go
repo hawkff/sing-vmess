@@ -105,7 +105,10 @@ func (c *Client) DialEarlyXUDPPacketConn(upstream net.Conn, destination M.Socksa
 	return NewXUDPConn(&clientConn{c.dialRaw(upstream, CommandMux, destination)}, destination)
 }
 
-var _ N.EarlyConn = (*rawClientConn)(nil)
+var (
+	_ N.EarlyReader = (*rawClientConn)(nil)
+	_ N.EarlyWriter = (*rawClientConn)(nil)
+)
 
 type rawClientConn struct {
 	*Client
@@ -163,14 +166,12 @@ func (c *Client) dialRaw(upstream net.Conn, command byte, destination M.Socksadd
 	return conn
 }
 
-func (c *rawClientConn) NeedHandshake() bool {
-	return c.writer == nil
-}
-
-// it only lets future sing v0.8+ pick up the read-side handshake.
-// or use  EarlyReader/EarlyWriter in sing v0.8+
 func (c *rawClientConn) NeedHandshakeForRead() bool {
 	return c.reader == nil
+}
+
+func (c *rawClientConn) NeedHandshakeForWrite() bool {
+	return c.writer == nil
 }
 
 func (c *rawClientConn) writeHandshake(payload []byte) error {
@@ -420,6 +421,10 @@ func (c *rawClientConn) FrontHeadroom() int {
 
 func (c *rawClientConn) RearHeadroom() int {
 	return MaxRearHeadroom
+}
+
+func (c *rawClientConn) ReaderOverhead() int {
+	return ReaderOverhead(c.security, c.option)
 }
 
 func (c *rawClientConn) NeedAdditionalReadDeadline() bool {
