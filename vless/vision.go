@@ -46,6 +46,10 @@ type VisionConn struct {
 	directConn  net.Conn
 	logger      logger.Logger
 
+	// connAccess guards directConn against Close, which must not wait for writeAccess: Write holds it while blocked.
+	connAccess sync.Mutex
+	closed     bool
+
 	userUUID               [16]byte
 	isTLS                  bool
 	numberOfPacketToFilter int
@@ -311,7 +315,17 @@ func (c *VisionConn) SetDirectConn(conn net.Conn) {
 	}
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
-	c.directConn = conn
+	c.connAccess.Lock()
+	closed := c.closed
+	if !closed {
+		c.directConn = conn
+	}
+	c.connAccess.Unlock()
+	// A connection handed over after Close would stay open.
+	if closed {
+		_ = conn.Close()
+		return
+	}
 	if c.directWrite.Load() {
 		c.writer = bufio.NewVectorisedWriter(conn)
 	}
@@ -692,16 +706,25 @@ func (c *VisionConn) unPadding(buffer []byte) []*buf.Buffer {
 }
 
 // Close closes the raw connections once writes go direct: closing through the TLS layer would write a TLS alert into
-// a stream that no longer carries TLS records.
+// a stream that no longer carries TLS records. A direct connection handed over by SetDirectConn closes either way, as
+// closing the TLS layer does not reach it.
 func (c *VisionConn) Close() error {
+	c.connAccess.Lock()
+	c.closed = true
+	directConn := c.directConn
+	c.connAccess.Unlock()
 	if c.directWrite.Load() {
-		err := c.directConn.Close()
-		if c.netConn != nil && c.netConn != c.directConn {
+		err := directConn.Close()
+		if c.netConn != nil && c.netConn != directConn {
 			err = E.Errors(err, c.netConn.Close())
 		}
 		return err
 	}
-	return c.Conn.Close()
+	err := c.Conn.Close()
+	if directConn != nil && directConn != c.rawConn && directConn != c.netConn {
+		err = E.Errors(err, directConn.Close())
+	}
+	return err
 }
 
 func (c *VisionConn) NeedAdditionalReadDeadline() bool {
