@@ -9,6 +9,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/sagernet/sing/common"
@@ -54,7 +55,7 @@ type VisionConn struct {
 	enableXTLS             bool
 	canSplice              bool
 	isPadding              bool
-	directWrite            bool
+	directWrite            atomic.Bool
 	writeUUID              bool
 	withinPaddingBuffers   bool
 	remainingContent       int
@@ -311,7 +312,7 @@ func (c *VisionConn) SetDirectConn(conn net.Conn) {
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
 	c.directConn = conn
-	if c.directWrite {
+	if c.directWrite.Load() {
 		c.writer = bufio.NewVectorisedWriter(conn)
 	}
 }
@@ -535,13 +536,13 @@ func (c *VisionConn) Write(p []byte) (n int, err error) {
 		if err == nil {
 			n = inputLen
 			if switchToDirectAfterWrite {
-				c.directWrite = true
+				c.directWrite.Store(true)
 				c.writer = bufio.NewVectorisedWriter(c.directConn)
 			}
 		}
 		return
 	}
-	if c.directWrite {
+	if c.directWrite.Load() {
 		return c.directConn.Write(p)
 	} else {
 		return c.Conn.Write(p)
@@ -690,6 +691,19 @@ func (c *VisionConn) unPadding(buffer []byte) []*buf.Buffer {
 	return buffers
 }
 
+// Close closes the raw connections once writes go direct: closing through the TLS layer would write a TLS alert into
+// a stream that no longer carries TLS records.
+func (c *VisionConn) Close() error {
+	if c.directWrite.Load() {
+		err := c.directConn.Close()
+		if c.netConn != nil && c.netConn != c.directConn {
+			err = E.Errors(err, c.netConn.Close())
+		}
+		return err
+	}
+	return c.Conn.Close()
+}
+
 func (c *VisionConn) NeedAdditionalReadDeadline() bool {
 	return true
 }
@@ -705,7 +719,7 @@ func (c *VisionConn) ReaderReplaceable() bool {
 func (c *VisionConn) WriterReplaceable() bool {
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
-	return c.directWrite
+	return c.directWrite.Load()
 }
 
 func (c *VisionConn) UpstreamReader() any {
@@ -718,7 +732,7 @@ func (c *VisionConn) UpstreamReader() any {
 func (c *VisionConn) UpstreamWriter() any {
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
-	if c.directWrite {
+	if c.directWrite.Load() {
 		return c.directConn
 	}
 	return nil
