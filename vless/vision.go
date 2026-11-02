@@ -9,6 +9,7 @@ import (
 	"net"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/sagernet/sing/common"
@@ -45,6 +46,10 @@ type VisionConn struct {
 	directConn  net.Conn
 	logger      logger.Logger
 
+	// connAccess guards directConn against Close, which must not wait for writeAccess: Write holds it while blocked.
+	connAccess sync.Mutex
+	closed     bool
+
 	userUUID               [16]byte
 	isTLS                  bool
 	numberOfPacketToFilter int
@@ -54,7 +59,7 @@ type VisionConn struct {
 	enableXTLS             bool
 	canSplice              bool
 	isPadding              bool
-	directWrite            bool
+	directWrite            atomic.Bool
 	writeUUID              bool
 	withinPaddingBuffers   bool
 	remainingContent       int
@@ -310,8 +315,18 @@ func (c *VisionConn) SetDirectConn(conn net.Conn) {
 	}
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
-	c.directConn = conn
-	if c.directWrite {
+	c.connAccess.Lock()
+	closed := c.closed
+	if !closed {
+		c.directConn = conn
+	}
+	c.connAccess.Unlock()
+	// A connection handed over after Close would stay open.
+	if closed {
+		_ = conn.Close()
+		return
+	}
+	if c.directWrite.Load() {
 		c.writer = bufio.NewVectorisedWriter(conn)
 	}
 }
@@ -535,13 +550,13 @@ func (c *VisionConn) Write(p []byte) (n int, err error) {
 		if err == nil {
 			n = inputLen
 			if switchToDirectAfterWrite {
-				c.directWrite = true
+				c.directWrite.Store(true)
 				c.writer = bufio.NewVectorisedWriter(c.directConn)
 			}
 		}
 		return
 	}
-	if c.directWrite {
+	if c.directWrite.Load() {
 		return c.directConn.Write(p)
 	} else {
 		return c.Conn.Write(p)
@@ -690,6 +705,28 @@ func (c *VisionConn) unPadding(buffer []byte) []*buf.Buffer {
 	return buffers
 }
 
+// Close closes the raw connections once writes go direct: closing through the TLS layer would write a TLS alert into
+// a stream that no longer carries TLS records. A direct connection handed over by SetDirectConn closes either way, as
+// closing the TLS layer does not reach it.
+func (c *VisionConn) Close() error {
+	c.connAccess.Lock()
+	c.closed = true
+	directConn := c.directConn
+	c.connAccess.Unlock()
+	if c.directWrite.Load() {
+		err := directConn.Close()
+		if c.netConn != nil && c.netConn != directConn {
+			err = E.Errors(err, c.netConn.Close())
+		}
+		return err
+	}
+	err := c.Conn.Close()
+	if directConn != nil && directConn != c.rawConn && directConn != c.netConn {
+		err = E.Errors(err, directConn.Close())
+	}
+	return err
+}
+
 func (c *VisionConn) NeedAdditionalReadDeadline() bool {
 	return true
 }
@@ -705,7 +742,7 @@ func (c *VisionConn) ReaderReplaceable() bool {
 func (c *VisionConn) WriterReplaceable() bool {
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
-	return c.directWrite
+	return c.directWrite.Load()
 }
 
 func (c *VisionConn) UpstreamReader() any {
@@ -718,7 +755,7 @@ func (c *VisionConn) UpstreamReader() any {
 func (c *VisionConn) UpstreamWriter() any {
 	c.writeAccess.Lock()
 	defer c.writeAccess.Unlock()
-	if c.directWrite {
+	if c.directWrite.Load() {
 		return c.directConn
 	}
 	return nil
